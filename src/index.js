@@ -3,7 +3,7 @@
 const { optimizeROI } = require('./optimization/optimizeROI');
 
 const { writeFileSync, existsSync, mkdirSync } = require('fs');
-const { resolve } = require('path');
+const { join } = require('path');
 const { argv } = require('yargs');
 const { xyExtract, xMinMaxValues, xMedian } = require('ml-spectra-processing');
 const { generateSpectrum } = require('spectrum-generator');
@@ -11,7 +11,9 @@ const { isAnyArray } = require('is-any-array');
 const { xyAutoRangesPicking } = require('nmr-processing');
 const { fileListFromPath } = require('filelist-utils');
 const { convertFileList, groupByExperiments } = require('brukerconverter');
-const { converterOptions, getName, groupExperiments } = require('./options');
+const { converterOptions, getName } = require('./options');
+
+const line = `${new Array(40).fill('-').join('')}\n`;
 
 (async () => {
   // const path = '/nmr/IVDR02/data/covid19_heidelberg_URI_NMR_URINE_IVDR02_COVp93_181121';
@@ -19,8 +21,8 @@ const { converterOptions, getName, groupExperiments } = require('./options');
   // const pathToWrite = '/home/abolanos/result_peakpicking_fit4';
 
   const {
-    path = resolve('./data'),
-    pathToWrite = resolve('../results'),
+    path = join(__dirname, './data'),
+    pathToWrite = join(__dirname, '../results'),
   } = argv;
 
   if (!existsSync(pathToWrite)) {
@@ -31,28 +33,22 @@ const { converterOptions, getName, groupExperiments } = require('./options');
   const tempExperiments = groupByExperiments(fileList, converterOptions.filter);
   const experiments = tempExperiments.filter((exp) => exp.expno % 10 === 0);
 
-  const groupsOfExperiments = groupExperiments(experiments);
+  for (let i = 0; i < experiments.length; i++) {
+    const data = (await convertFileList(experiments[i].fileList, converterOptions))[0];
 
-  for (const goe of groupsOfExperiments) {
-    const groupFileList = [];
-    for (const experiment of goe) {
-      groupFileList.push(...experiment.fileList);
+    console.log(`${line}Data No.${i + 1} of ${experiments.length} \nSource: ${data.source.name}, expno: ${data.source.expno}`)
+
+    const frequency = data.meta.SF;
+    const name = getName(data);
+    let spectrum = data.spectra[0].data;
+    if (spectrum.x[0] > spectrum.x[1]) {
+      spectrum.x = spectrum.x.reverse();
+      spectrum.re = spectrum.re.reverse();
     }
 
-    const data = await convertFileList(groupFileList, converterOptions);
-    for (let i = 0; i < data.length; i++) {
-      const frequency = data[i].meta.SF;
-      const name = getName(data[i]);
-      let spectrum = data[i].spectra[0].data;
-      if (spectrum.x[0] > spectrum.x[1]) {
-        spectrum.x = spectrum.x.reverse();
-        spectrum.re = spectrum.re.reverse();
-      }
+    const xyData = { x: spectrum.x, y: spectrum.re };
 
-      const xyData = { x: spectrum.x, y: spectrum.re };
-
-      await process({ xyData, name, pathToWrite, frequency })
-    }
+    process({ xyData, name, pathToWrite, frequency })
   }
 })()
 
@@ -72,11 +68,7 @@ function process(options) {
 
   if (medianOfAll * 3 > medianOfROI) return;
   const ranges = xyAutoRangesPicking(experimental, { peakPicking: { frequency }, ranges: { keepPeaks: true, compile: false, joinOverlapRanges: false, frequencyCluster: 6 } });
-  console.log(ranges.length, ranges.map(e => e.from), medianOfAll, medianOfROI, name);
   if (ranges.length === 0) return;
-  console.log(ranges[ranges.length - 1].signals.reduce((nbPeaks, signal) => {
-    return nbPeaks + signal.peaks.length;
-  }, 0), ranges[ranges.length - 1].signals[0].peaks.length)
 
   const { rangeIndex, signalIndex, peakIndex } = getBiggestPeak(ranges);
 
@@ -104,7 +96,6 @@ function process(options) {
       : (ranges[ranges.length - 1].from + ranges[ranges.length - 1].to) / 2,
     gradientDifference: 0.0001
   }
-  console.log(x1Limits, x2Limits);
   const minMaxY = xMinMaxValues(experimental.y);
   const range = minMaxY.max - minMaxY.min;
   minMaxY.range = range;
@@ -159,21 +150,18 @@ function process(options) {
       }
     },
   ];
-  // console.log(signals[0].parameters.x)
-  // return
   const tempSignals = optimizeROI({ x: experimental.x, y: normalized }, signals, {
     baseline: 0,
     shape: { kind: 'gaussian' },
     optimization: {
       kind: 'direct',
       options: {
-        iterations: 10,
+        iterations: 25,
       }
     }
   });
   tempSignals.forEach((signal, i, arr) => {
     const fwhm = signal.shape.fwhm;
-    console.log(signal)
     arr[i].shape = {
       kind: 'pseudoVoigt',
       fwhm,
@@ -190,7 +178,6 @@ function process(options) {
     }
   });
 
-  // writeFileSync('signals.json', JSON.stringify(newSignals));
   const peaks = newSignals.flatMap((signal) => {
     const { x: delta, y: intensity, coupling, pattern } = signal;
     delete signal.pattern;

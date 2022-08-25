@@ -68,7 +68,6 @@ function optimizeROI(data, signals, options = {}) {
     ...optimizationOptions
   });
 
-  console.log('iterations', fitted.iterations)
   const fittedValues = fitted.parameterValues;
 
   let newSignals = [];
@@ -115,7 +114,6 @@ function getSumOfShapes(internalSignals) {
           signal.shapeFct[signal.parameters[i]] = parameters[signal.fromIndex + i];
         }
         const coupling = parameters[signal.toIndex];
-        // console.log('coupling', coupling)?
         for (let peak of signal.pattern) {
           const { x, y } = peak;
           const halfCoupling = x / Math.abs(x) * coupling / 2;
