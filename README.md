@@ -1,6 +1,6 @@
 # pipe-doublets-deconvolution
 
-deconvolution of two overlaped doublets. Currently it is a not a general purpose package.
+Deconvolution of two overlaped doublets. Currently it is a not a general purpose package.
 
 ## Usage
 
