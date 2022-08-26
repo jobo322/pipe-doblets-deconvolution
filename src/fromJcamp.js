@@ -7,11 +7,13 @@ const { join } = require('path');
 const { argv } = require('yargs');
 const { xyExtract, xMinMaxValues, xMedian } = require('ml-spectra-processing');
 const { generateSpectrum } = require('spectrum-generator');
+const { convert: converter } = require('jcampconverter');
 const { isAnyArray } = require('is-any-array');
 const { xyAutoRangesPicking } = require('nmr-processing');
 const { fileListFromPath } = require('filelist-utils');
 const { convertFileList, groupByExperiments } = require('brukerconverter');
 const { converterOptions, getName } = require('./options');
+const { fromJCAMP } = require('nmr-parser');
 
 const line = `${new Array(40).fill('-').join('')}\n`;
 
@@ -30,25 +32,22 @@ const line = `${new Array(40).fill('-').join('')}\n`;
   }
 
   const fileList = fileListFromPath(path);
-  const tempExperiments = groupByExperiments(fileList, converterOptions.filter);
-  console.log(tempExperiments.length)
-  const experiments = tempExperiments.filter((exp) => exp.expno % 10 === 0);
+  for (let i = 0; i < fileList.length; i++) {
+    const data = fromJCAMP(await fileList[i].text(), converterOptions)[0];
 
-  for (let i = 0; i < experiments.length; i++) {
-    const data = (await convertFileList(experiments[i].fileList, converterOptions))[0];
-    
-    console.log(`${line}Data No.${i + 1} of ${experiments.length} \nSource: ${data.source.name}, expno: ${data.source.expno}`)
+    console.log(`${line}Data No.${i + 1} of ${fileList.length} \nSource: ${fileList[i].name}`)
 
     const frequency = data.meta.SF;
-    const name = getName(data);
-    let spectrum = data.spectra[0].data;
+    const possibleName = getName(data);
+    const name = possibleName.length > 0 ? possibleName : fileList[i].name.replace(/\.\w*/, '');
+
+    let spectrum = data.dependentVariables[0].components[0].data;
     if (spectrum.x[0] > spectrum.x[1]) {
       spectrum.x = spectrum.x.reverse();
-      spectrum.re = spectrum.re.reverse();
+      spectrum.y = spectrum.y.reverse();
     }
 
-    const xyData = { x: spectrum.x, y: spectrum.re };
-
+    const xyData = { x: spectrum.x, y: spectrum.y };
     process({ xyData, name, pathToWrite, frequency })
   }
 })()
@@ -66,7 +65,7 @@ function process(options) {
   const medianOfROI = xMedian(xyExtract(xyData, {
     zones: [{ from: 6.2, to: 6.4 }],
   }).y);
-
+  console.log(medianOfAll, medianOfROI);
   if (medianOfAll * 3 > medianOfROI) return;
   const ranges = xyAutoRangesPicking(experimental, { peakPicking: { frequency }, ranges: { keepPeaks: true, compile: false, joinOverlapRanges: false, frequencyCluster: 6 } });
   if (ranges.length === 0) return;
