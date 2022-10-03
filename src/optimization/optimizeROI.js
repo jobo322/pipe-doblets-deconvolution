@@ -151,7 +151,11 @@ function getInternalSignals(
     const shapeFct = getShape1D(shape);
 
     //@ts-expect-error Should disappear with next release of peak-shape-generator
-    const parameters = ['x', 'y', ...shapeFct.getParameters(), 'coupling'];
+    const parameters = ['x', 'y', ...shapeFct.getParameters()];
+
+    if (peaks.some((peak) => ('coupling' in peak))) {
+      parameters.push('coupling');
+    }
 
     const propertiesValues = {
       min: [],

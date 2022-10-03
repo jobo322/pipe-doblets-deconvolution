@@ -1,23 +1,26 @@
 'use strict';
 
-const { optimizeROI } = require('./optimization/optimizeROI');
-
 const { writeFileSync, existsSync, mkdirSync } = require('fs');
 const { join } = require('path');
 // const { argv } = require('yargs');
-const { xyExtract, xMinMaxValues, xMedian } = require('ml-spectra-processing');
+const { xyExtract, xMinMaxValues, xMedian, xNoiseSanPlot } = require('ml-spectra-processing');
 const { generateSpectrum } = require('spectrum-generator');
 const { isAnyArray } = require('is-any-array');
-const { xyAutoRangesPicking } = require('nmr-processing');
+const { xyAutoRangesPicking, optimizeSignals } = require('nmr-processing');
 const { fileListFromPath } = require('filelist-utils');
 const { convertFileList, groupByExperiments } = require('brukerconverter');
-const { converterOptions, getName } = require('./options');
+const { converterOptions, getName, paths } = require('./options');
+const { getLorentzianArea, getPseudoVoigtArea } = require('ml-peak-shape-generator');
+const exp = require('constants');
+
+const baselineCorrection = require('ml-baseline-correction-regression');
 
 const line = `${new Array(40).fill('-').join('')}\n`;
+
 (async () => {
-  const path = '/nmr/IVDR02/data/covid19_heidelberg_URI_NMR_URINE_IVDR02_COVp93_181121';
-  // let path = '/home/abolanos/spectraTest/covid19_heidelberg_URI_NMR_URINE_IVDR02_COVp93_181121';
-  const pathToWrite = '/home/centos/testTest3';
+  // const pathToWrite = '/home/centos/twoDoubletQuant';// for ANPC run
+  // const pathToWrite = '/home/centos/Heid'; // for Heid TimeCurve data 
+  const pathToWrite = '/home/centos/Covax2_withBC';// for covvax
 
   // const {
   //   path = join(__dirname, './data'),
@@ -28,42 +31,56 @@ const line = `${new Array(40).fill('-').join('')}\n`;
     mkdirSync(pathToWrite);
   }
 
-  const fileList = fileListFromPath(path);
-  const tempExperiments = groupByExperiments(fileList, converterOptions.filter);
-  console.log(tempExperiments.length)
-  const experiments = tempExperiments.filter((exp) => exp.expno % 10 === 0);
+  for (const path of paths) {
+    const fileList = fileListFromPath(path);
 
-  for (let i = 0; i < experiments.length; i++) {
-    const data = (await convertFileList(experiments[i].fileList, converterOptions))[0];
+    //  For ANPC data run below
+    const tempExperiments = groupByExperiments(fileList, converterOptions.filter);
+    const experiments = tempExperiments.filter((exp) => exp.expno % 10 === 0);
 
-    console.log(`${line}Data No.${i + 1} of ${experiments.length} \nSource: ${data.source.name}, expno: ${data.source.expno}`)
+    // for HEID transfer data run below
+    // const tempExperiments = groupByExperiments(fileList, converterOptions.filter);
+    // const experiments = tempExperiments.filter((exp) => exp.expno % 13 === 0);
 
-    const frequency = data.meta.SF;
-    const name = getName(data);
-    let spectrum = data.spectra[0].data;
-    if (spectrum.x[0] > spectrum.x[1]) {
-      spectrum.x = spectrum.x.reverse();
-      spectrum.re = spectrum.re.reverse();
+    for (let i = 0; i < experiments.length; i++) {
+      const data = (await convertFileList(experiments[i].fileList, converterOptions))[0];
+
+      console.log(`${line}Data No.${i + 1} of ${experiments.length} \nSource: ${data.source.name}, expno: ${data.source.expno}`)
+
+      const frequency = data.meta.SF;
+      const name = getName(data);   // for ANPC and others
+      // const name = data.source.name; //for Heid timepoint ones
+      // console.log(data.source.name)
+      let spectrum = data.spectra[0].data;
+      if (spectrum.x[0] > spectrum.x[1]) {
+        spectrum.x = spectrum.x.reverse();
+        spectrum.re = spectrum.re.reverse();
+      }
+
+      const xyData = { x: spectrum.x, y: spectrum.re };
+
+      process({ xyData, name, pathToWrite, frequency })
     }
-
-    const xyData = { x: spectrum.x, y: spectrum.re };
-
-    process({ xyData, name, pathToWrite, frequency })
   }
 })()
 
 function process(options) {
   const { xyData, name, pathToWrite, frequency } = options;
 
-  const fromTo = { from: 6.27, to: 6.315 };
+  // const fromTo = { from: 6.27, to: 6.33 };  // range is quite wide it maybe bettter changing "to 6.315"
+  const fromTo = { from: 6.28, to: 6.31 }; // changed to 6.31 from 6.32 RM
 
-  const experimental = xyExtract(xyData, {
+  const { y: originalY, x } = xyData;
+
+  const { corrected, delta, iteration, baseline } = baselineCorrection(x, originalY);
+  const sanPlot = xNoiseSanPlot(corrected);
+  const experimental = xyExtract({ y: corrected, x }, {
     zones: [fromTo],
   });
 
-  const medianOfAll = xMedian(xyData.y);
-  const medianOfROI = xMedian(xyExtract(xyData, {
-    zones: [{ from: 6.2, to: 6.4 }],
+  const medianOfAll = sanPlot.positive;
+  const medianOfROI = xMedian(xyExtract({ y: corrected, x }, {
+    zones: [{ from: 6.2, to: 8.0 }], // bigger reference range that covers all compounds
   }).y);
 
   if (medianOfAll * 3 > medianOfROI) return;
@@ -101,56 +118,48 @@ function process(options) {
   minMaxY.range = range;
   const normalized = experimental.y.map((e) => e / range);
 
-  const js = 2.34 / frequency; // in Hz
+  const js = 2.34 //  in HZ for ANPC
+  // const js = 2.0 / frequency;
+  const widthGuess = 0.97; //In Hz
 
-  const widthGuess = 0.97 / frequency; //in Hz
   const signals = [
     {
-      x: 6.290,
-      y: 1,
-      coupling: js,
-      pattern: [{ x: -js / 2, y: 1 }, { x: js / 2, y: 1 }],
+      delta: 6.290, // for ANPC
+      // x: 6.296, // for heid timecurve??
+      intensity: 1,
+      js: [{ multiplicity: 'd', coupling: js }],
       parameters: {
-        x: x1Limits,
-        y: {
+        delta: x1Limits,
+        intensity: {
           min: 0,
-          max: 1,
           gradientDifference: 0.001
         },
         fwhm: {
           min: widthGuess / 2,
           max: widthGuess * 1.2,
         },
-        coupling: {
-          min: js * 0.9,
-          max: js * 1.2,
-        }
       }
     },
     {
-      x: 6.283,
-      y: 0.5,
-      coupling: js,
-      pattern: [{ x: -js / 2, y: 1 }, { x: js / 2, y: 1 }],
+      delta: 6.290, // for ANPC
+      // x: 6.296, // for heid timecurve??
+      intensity: 1,
+      js: [{ multiplicity: 'd', coupling: js }],
       parameters: {
-        x: x2Limits,
-        y: {
+        delta: x2Limits,
+        intensity: {
           min: 0,
-          max: 1,
           gradientDifference: 0.001
         },
         fwhm: {
           min: widthGuess / 2,
           max: widthGuess * 1.2,
-        },
-        coupling: {
-          min: js * 0.8,
-          max: js * 1.2,
         }
       }
     },
   ];
-  const tempSignals = optimizeROI({ x: experimental.x, y: normalized }, signals, {
+
+  const tempSignals = optimizeSignals(experimental, signals, {
     baseline: 0,
     shape: { kind: 'gaussian' },
     optimization: {
@@ -158,51 +167,63 @@ function process(options) {
       options: {
         iterations: 25,
       }
+    },
+    simulation: {
+      frequency,
+      maxClusterSize: 1,
+    },
+    parameters: {
+      coupling: {
+        min: (opt) => opt.jCoupling.coupling * 0.8,
+        max: (opt) => opt.jCoupling.coupling * 1.2,
+      },
     }
   });
+  // change the shape to add mu parameter in the optimization
   tempSignals.forEach((signal, i, arr) => {
     const fwhm = signal.shape.fwhm;
     arr[i].shape = {
       kind: 'pseudoVoigt',
       fwhm,
-      mu: 0,
+      mu: 0.5,
     }
   });
-  const newSignals = optimizeROI({ x: experimental.x, y: normalized }, tempSignals, {
+
+  const newSignals = optimizeSignals(experimental, tempSignals, {
     baseline: 0,
     optimization: {
       kind: 'lm',
       options: {
         maxIterations: 2000,
       }
+    },
+    simulation: {
+      frequency,
+      maxClusterSize: 1,
+    },
+    parameters: {
+      coupling: {
+        min: (opt) => opt.jCoupling.coupling * 0.8,
+        max: (opt) => opt.jCoupling.coupling * 1.2,
+      },
     }
   });
-
-  const peaks = newSignals.flatMap((signal) => {
-    const { x: delta, y: intensity, coupling, pattern } = signal;
-    delete signal.pattern;
-    const halfCoupling = coupling / 2;
-    return pattern.map((peak) => {
-      const { x, y } = peak;
-      return {
-        ...signal,
-        x: delta + (x / Math.abs(x) * halfCoupling),
-        y: intensity * y,
-      }
-    })
+  const peaks = newSignals.flatMap((signal, i, arr) => {
+    // arr[i].y *= range;
+    const { intensity: height, shape, peaks } = arr[i];
+    const { fwhm, mu } = shape;
+    const integration = getPseudoVoigtArea({ height, fwhm, mu }) * peaks.length;
+    newSignals[i].integration = integration;
+    return peaks.map((peak) => {
+      peak.shape.fwhm /= frequency;
+      peak.width /= frequency;
+      return peak;
+    });
   })
-
-  peaks.forEach((peak, i, arr) => {
-    arr[i].y *= range;
-  })
-
-  newSignals.forEach((_, i, arr) => {
-    arr[i].y *= range;
-  });
 
   const fit = generateSpectrum(peaks, { generator: { nbPoints: experimental.x.length, ...fromTo } })
   const residual = experimental.y.map((e, i) => e - fit.y[i]);
-  writeFileSync(join(pathToWrite, `${name}_FIT.json`), JSON.stringify([{
+  writeFileSync(join(pathToWrite, `${name}_twoDoublets.json`), JSON.stringify([{
     name,
     expno: 'null',
     fit: [
@@ -212,7 +233,8 @@ function process(options) {
         residual: Array.from(residual),
         peaks: [],
         optimizedPeaks: peaks,
-        signals: newSignals
+        signals: newSignals,
+        ranges: ranges,
       }
     ],
     xyData: ensureArray(experimental),
@@ -257,3 +279,6 @@ function getBiggestPeak(ranges) {
   }
   return indices;
 }
+
+
+

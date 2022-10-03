@@ -48,7 +48,7 @@
     "ml-peak-shape-generator": "^4.1.1",
     "ml-spectra-processing": "^11.12.0",
     "nmr-parser": "^1.9.1",
-    "nmr-processing": "^9.0.3",
+    "nmr-processing": "9.1.0-pre.1663616845",
     "spectrum-generator": "^8.0.2",
     "yargs": "^17.5.1"
   }

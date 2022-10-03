@@ -11,13 +11,14 @@ const { isAnyArray } = require('is-any-array');
 const { xyAutoRangesPicking } = require('nmr-processing');
 const { fileListFromPath } = require('filelist-utils');
 const { convertFileList, groupByExperiments } = require('brukerconverter');
-const { converterOptions, getName } = require('./options');
+const { converterOptions, getName, paths } = require('./options');
+const { getLorentzianArea, getPseudoVoigtArea } = require('ml-peak-shape-generator');
+const exp = require('constants');
 
 const line = `${new Array(40).fill('-').join('')}\n`;
+
 (async () => {
-  const path = '/nmr/IVDR02/data/covid19_heidelberg_URI_NMR_URINE_IVDR02_COVp93_181121';
-  // let path = '/home/abolanos/spectraTest/covid19_heidelberg_URI_NMR_URINE_IVDR02_COVp93_181121';
-  const pathToWrite = '/home/centos/testTest3';
+  const pathToWrite = '/home/centos/Citrate' ;
 
   // const {
   //   path = join(__dirname, './data'),
@@ -28,34 +29,35 @@ const line = `${new Array(40).fill('-').join('')}\n`;
     mkdirSync(pathToWrite);
   }
 
-  const fileList = fileListFromPath(path);
-  const tempExperiments = groupByExperiments(fileList, converterOptions.filter);
-  console.log(tempExperiments.length)
-  const experiments = tempExperiments.filter((exp) => exp.expno % 10 === 0);
+  for (const path of paths) {
+    const fileList = fileListFromPath(path);
+    const tempExperiments = groupByExperiments(fileList, converterOptions.filter);
+    const experiments = tempExperiments.filter((exp) => exp.expno % 10 === 0);
 
-  for (let i = 0; i < experiments.length; i++) {
-    const data = (await convertFileList(experiments[i].fileList, converterOptions))[0];
+    for (let i = 0; i < experiments.length; i++) {
+      const data = (await convertFileList(experiments[i].fileList, converterOptions))[0];
 
-    console.log(`${line}Data No.${i + 1} of ${experiments.length} \nSource: ${data.source.name}, expno: ${data.source.expno}`)
+      console.log(`${line}Data No.${i + 1} of ${experiments.length} \nSource: ${data.source.name}, expno: ${data.source.expno}`)
 
-    const frequency = data.meta.SF;
-    const name = getName(data);
-    let spectrum = data.spectra[0].data;
-    if (spectrum.x[0] > spectrum.x[1]) {
-      spectrum.x = spectrum.x.reverse();
-      spectrum.re = spectrum.re.reverse();
+      const frequency = data.meta.SF;
+      const name = getName(data);  // 
+      let spectrum = data.spectra[0].data;
+      if (spectrum.x[0] > spectrum.x[1]) {
+        spectrum.x = spectrum.x.reverse();
+        spectrum.re = spectrum.re.reverse();
+      }
+
+      const xyData = { x: spectrum.x, y: spectrum.re };
+
+      process({ xyData, name, pathToWrite, frequency })
     }
-
-    const xyData = { x: spectrum.x, y: spectrum.re };
-
-    process({ xyData, name, pathToWrite, frequency })
   }
 })()
 
 function process(options) {
   const { xyData, name, pathToWrite, frequency } = options;
 
-  const fromTo = { from: 6.27, to: 6.315 };
+  const fromTo = { from: 2.5, to: 2.6 };
 
   const experimental = xyExtract(xyData, {
     zones: [fromTo],
@@ -63,53 +65,50 @@ function process(options) {
 
   const medianOfAll = xMedian(xyData.y);
   const medianOfROI = xMedian(xyExtract(xyData, {
-    zones: [{ from: 6.2, to: 6.4 }],
+    zones: [{ from: 2.3, to: 2.8 }], // bigger reference range that covers all compounds
   }).y);
 
-  if (medianOfAll * 3 > medianOfROI) return;
-  const ranges = xyAutoRangesPicking(experimental, { peakPicking: { frequency }, ranges: { keepPeaks: true, compile: false, joinOverlapRanges: false, frequencyCluster: 6 } });
-  if (ranges.length === 0) return;
+  if (medianOfAll * 2 > medianOfROI) {
+    console.log("median failed")
+    return
+  };
+
+  const ranges = xyAutoRangesPicking(experimental, { peakPicking: { frequency }, ranges: { keepPeaks: true, compile: false, joinOverlapRanges: false, frequencyCluster: 16 } });
+  if (ranges.length === 0) {
+    console.log("not found")
+    return;
+  }
 
   const { rangeIndex, signalIndex, peakIndex } = getBiggestPeak(ranges);
 
-  const peaksCloseToBiggest = ranges[rangeIndex].signals[signalIndex].peaks
+  const peaksCloseToBiggest = ranges[rangeIndex].signals[signalIndex].peaks;
   const biggestPeak = ranges[rangeIndex]?.signals[signalIndex]?.peaks[peakIndex];
+  const peakLength = ranges[rangeIndex].signals[signalIndex].peaks.length;
+  console.log(peakLength, ranges[rangeIndex].signals[signalIndex]);
+  if (peakLength < 2) {
+    console.log("too few")
+    return;
+  }
   const x1Limits = {
-    min: biggestPeak
-      ? biggestPeak.x
-      : (ranges[ranges.length - 1].from + ranges[ranges.length - 1].to) / 2,
-    max: biggestPeak
-      ? peakIndex < peaksCloseToBiggest.length - 1
-        ? peaksCloseToBiggest[peakIndex + 1].x
-        : biggestPeak.x + biggestPeak.width / frequency * 2
-      : biggestPeak.x,
+    min: ranges[rangeIndex].signals[signalIndex].delta - 0.01,
+    max: ranges[rangeIndex].signals[signalIndex].delta + 0.01,
     gradientDifference: 0.0001
   }
-  const x2Limits = {
-    min: biggestPeak
-      ? peakIndex > 0
-        ? peaksCloseToBiggest[peakIndex - 1].x
-        : biggestPeak.x - biggestPeak.width / frequency * 2
-      : ranges[ranges.length - 1].from,
-    max: biggestPeak
-      ? biggestPeak.x
-      : (ranges[ranges.length - 1].from + ranges[ranges.length - 1].to) / 2,
-    gradientDifference: 0.0001
-  }
+
   const minMaxY = xMinMaxValues(experimental.y);
   const range = minMaxY.max - minMaxY.min;
   minMaxY.range = range;
   const normalized = experimental.y.map((e) => e / range);
 
-  const js = 2.34 / frequency; // in Hz
-
-  const widthGuess = 0.97 / frequency; //in Hz
+  const js = 15.77 / frequency; // in ppm
+  // const widthGuess = 0.97 / frequency; //in ppm
+  const widthGuess = 2.0 / frequency; //in ppm
   const signals = [
     {
-      x: 6.290,
+      x: 2.54,
       y: 1,
       coupling: js,
-      pattern: [{ x: -js / 2, y: 1 }, { x: js / 2, y: 1 }],
+      pattern: [{ x: -js / 2, y: 0.7 }, { x: js / 2, y: 1 }],
       parameters: {
         x: x1Limits,
         y: {
@@ -118,29 +117,7 @@ function process(options) {
           gradientDifference: 0.001
         },
         fwhm: {
-          min: widthGuess / 2,
-          max: widthGuess * 1.2,
-        },
-        coupling: {
-          min: js * 0.9,
-          max: js * 1.2,
-        }
-      }
-    },
-    {
-      x: 6.283,
-      y: 0.5,
-      coupling: js,
-      pattern: [{ x: -js / 2, y: 1 }, { x: js / 2, y: 1 }],
-      parameters: {
-        x: x2Limits,
-        y: {
-          min: 0,
-          max: 1,
-          gradientDifference: 0.001
-        },
-        fwhm: {
-          min: widthGuess / 2,
+          min: widthGuess / 3,
           max: widthGuess * 1.2,
         },
         coupling: {
@@ -178,31 +155,27 @@ function process(options) {
     }
   });
 
-  const peaks = newSignals.flatMap((signal) => {
-    const { x: delta, y: intensity, coupling, pattern } = signal;
+  const peaks = newSignals.flatMap((signal, i, arr) => {
+    arr[i].y *= range;
+    const { x: delta, y: height, coupling, pattern, shape } = arr[i];
     delete signal.pattern;
     const halfCoupling = coupling / 2;
+    const { fwhm, mu } = shape;
+    const integration = getPseudoVoigtArea({ height, fwhm, mu }) * 2;
+    newSignals[i].integration = integration;
     return pattern.map((peak) => {
       const { x, y } = peak;
       return {
         ...signal,
         x: delta + (x / Math.abs(x) * halfCoupling),
-        y: intensity * y,
+        y: height * y,
       }
     })
   })
 
-  peaks.forEach((peak, i, arr) => {
-    arr[i].y *= range;
-  })
-
-  newSignals.forEach((_, i, arr) => {
-    arr[i].y *= range;
-  });
-
   const fit = generateSpectrum(peaks, { generator: { nbPoints: experimental.x.length, ...fromTo } })
   const residual = experimental.y.map((e, i) => e - fit.y[i]);
-  writeFileSync(join(pathToWrite, `${name}_FIT.json`), JSON.stringify([{
+  writeFileSync(join(pathToWrite, `${name}_Citrate.json`), JSON.stringify([{
     name,
     expno: 'null',
     fit: [
@@ -256,4 +229,11 @@ function getBiggestPeak(ranges) {
     }
   }
   return indices;
+
 }
+
+
+
+
+
+
